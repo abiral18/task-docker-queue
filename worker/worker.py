@@ -30,11 +30,11 @@ def handle_signal(signum, frame):
 signal.signal(signal.SIGINT, handle_signal)
 
 
-# --- Task processors (simulate document processing) ---
+# --- Task processors ---
 
 def process_ocr(payload):
     pages = payload.get("pages", 5)
-    time.sleep(0.3 * pages)  # simulate work
+    time.sleep(0.3 * pages)
     return {"pages_processed": pages, "confidence": round(random.uniform(0.85, 0.99), 3)}
 
 
@@ -63,16 +63,45 @@ PROCESSORS = {
 }
 
 
-# --- Core loop ---
+# --- Worker registration + heartbeat ---
+
+def register():
+    r.sadd("workers:active", WORKER_ID)
+    r.hset(f"worker:{WORKER_ID}", mapping={
+        "worker_id": WORKER_ID,
+        "status": "idle",
+        "started_at": time.time(),
+        "last_heartbeat": time.time(),
+        "tasks_completed": 0,
+        "tasks_failed": 0,
+        "current_task": "",
+    })
+    log.info(f"Registered as {WORKER_ID}")
+
+
+def deregister():
+    r.srem("workers:active", WORKER_ID)
+    r.delete(f"worker:{WORKER_ID}")
+    log.info(f"Deregistered {WORKER_ID}")
+
+
+def heartbeat():
+    r.hset(f"worker:{WORKER_ID}", "last_heartbeat", time.time())
+
+
+# --- Task execution with retries ---
 
 def execute_task(task_id):
     tk = f"task:{task_id}"
 
-    # Mark as running
     r.hset(tk, mapping={
         "status": "running",
         "started_at": time.time(),
         "worker_id": WORKER_ID,
+    })
+    r.hset(f"worker:{WORKER_ID}", mapping={
+        "status": "busy",
+        "current_task": task_id,
     })
 
     task_type = r.hget(tk, "task_type")
@@ -84,7 +113,6 @@ def execute_task(task_id):
     log.info(f"Processing {task_id[:12]}... (type={task_type}, retry={retries}/{max_retries})")
 
     try:
-        # 20% chance of simulated failure — for testing retries
         if random.random() < 0.2:
             raise RuntimeError("Simulated transient failure")
 
@@ -99,48 +127,66 @@ def execute_task(task_id):
             "completed_at": time.time(),
             "result": json.dumps(result),
         })
+        r.hincrby(f"worker:{WORKER_ID}", "tasks_completed", 1)
         log.info(f"Completed {task_id[:12]}...")
 
     except Exception as e:
         log.warning(f"Failed {task_id[:12]}...: {e}")
 
         if retries < max_retries:
-            # Re-queue with lower priority so fresh tasks go first
             new_retries = retries + 1
-            backoff = min(2 ** new_retries, 30)
             r.hset(tk, mapping={
                 "status": "retrying",
                 "retries": new_retries,
                 "error": str(e),
                 "worker_id": "",
             })
-            r.zadd("task_queue", {task_id: -1})  # low score = retry after fresh tasks
+            r.zadd("task_queue", {task_id: -1})
             log.info(f"Re-queued {task_id[:12]}... (retry {new_retries}/{max_retries})")
         else:
-            # Exhausted retries — dead letter queue
             r.hset(tk, mapping={
                 "status": "failed",
                 "completed_at": time.time(),
                 "error": str(e),
             })
             r.lpush("dead_letter_queue", task_id)
+            r.hincrby(f"worker:{WORKER_ID}", "tasks_failed", 1)
             log.error(f"Dead-lettered {task_id[:12]}... after {max_retries} retries")
 
+    finally:
+        r.hset(f"worker:{WORKER_ID}", mapping={
+            "status": "idle",
+            "current_task": "",
+        })
+
+
+# --- Main loop ---
 
 def run():
-    log.info(f"Worker {WORKER_ID} started, polling queue...")
+    register()
+    last_hb = time.time()
 
-    while not shutdown:
-        # ZPOPMAX grabs the highest-score task
-        result = r.zpopmax("task_queue", count=1)
+    try:
+        while not shutdown:
+            if time.time() - last_hb > 5:
+                heartbeat()
+                last_hb = time.time()
 
-        if result:
-            task_id, score = result[0]
-            execute_task(task_id)
-        else:
-            time.sleep(0.5)  # nothing in queue, wait
-
-    log.info("Worker shut down cleanly")
+            result = r.zpopmax("task_queue", count=1)
+            if result:
+                task_id, score = result[0]
+                status = r.hget(f"task:{task_id}", "status")
+                if status == "cancelled":
+                    log.info(f"Skipping cancelled task {task_id[:12]}...")
+                    continue
+                execute_task(task_id)
+            else:
+                time.sleep(0.5)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        deregister()
+        log.info("Worker shut down cleanly")
 
 
 if __name__ == "__main__":

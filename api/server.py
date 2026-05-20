@@ -122,3 +122,21 @@ def view_queue():
             for tid, score in items
         ],
     }
+@app.get("/metrics")
+def metrics():
+    queue_depth = r.zcard("task_queue")
+    worker_ids = r.smembers("workers:active")
+    dlq_size = r.llen("dead_letter_queue")
+
+    workers = []
+    for wid in worker_ids:
+        info = r.hgetall(f"worker:{wid}")
+        if info:
+            workers.append(info)
+
+    return {
+        "queue_depth": queue_depth,
+        "active_workers": len(worker_ids),
+        "workers": workers,
+        "dlq_size": dlq_size,
+    }
