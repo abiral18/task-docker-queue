@@ -10,7 +10,8 @@ from typing import Optional
 
 app = FastAPI(title="DocQueue")
 
-r = redis.Redis(host="localhost", port=6379, decode_responses=True)
+import os
+r = redis.Redis(host=os.getenv("REDIS_HOST", "localhost"), port=6379, decode_responses=True)
 
 
 # --- Models ---

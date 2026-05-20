@@ -15,7 +15,7 @@ logging.basicConfig(
 )
 log = logging.getLogger("worker")
 
-r = redis.Redis(host="localhost", port=6379, decode_responses=True)
+r = redis.Redis(host=os.getenv("REDIS_HOST", "localhost"), port=6379, decode_responses=True)
 
 WORKER_ID = f"worker-{uuid.uuid4().hex[:8]}"
 shutdown = False

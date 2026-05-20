@@ -1,6 +1,6 @@
 import logging
 import time
-
+import os
 import redis
 
 logging.basicConfig(
@@ -9,7 +9,7 @@ logging.basicConfig(
 )
 log = logging.getLogger("monitor")
 
-r = redis.Redis(host="localhost", port=6379, decode_responses=True)
+r = redis.Redis(host=os.getenv("REDIS_HOST", "localhost"), port=6379, decode_responses=True)
 
 HEARTBEAT_TIMEOUT = 15  # seconds before a worker is considered dead
 
